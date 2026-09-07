@@ -40,7 +40,6 @@ STRESS_UNIVERSE = {
     "159985": {"name": "豆粕ETF", "market": "sz", "sector": "Agriculture_Commodity"},
     "159865": {"name": "养殖ETF", "market": "sz", "sector": "Agriculture_Cycle"},
     "515210": {"name": "钢铁ETF", "market": "sh", "sector": "Heavy_Industry"},
-    "512690": {"name": "酒ETF", "market": "sh", "sector": "Consumer_Sub"},
 }
 
 def get_all_symbols():

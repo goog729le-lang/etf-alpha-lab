@@ -4,7 +4,7 @@
 1. 信号日与成交日物理隔离 (T 日收盘产生信号 -> T+1 开盘/收盘撮合，杜绝同 bar 偷价)
 2. 100 股整手限制与不足一手保留现金
 3. 双边佣金万三 + 保守滑点扣除
-4. 闲置现金真实货币基金/活期计息
+4. 闲置现金保持零利息 (按审计规范彻底去掉货基计息，避免空仓期虚增收益与胜率)
 5. 统一标准算术夏普比率口径: (日均超额收益 / 日收益波动率) * sqrt(242)
 """
 
@@ -74,14 +74,14 @@ class ETFBacktester:
         daily_records = []
         total_turnover_amount = 0.0
         trade_count = 0
-        daily_cash_yield = (1.0 + self.risk_free_rate) ** (1.0 / 242.0) - 1.0
+# 闲置现金严格不计息 (收益率恒为 0.0，避免空仓期利息对净值与日胜率灌水)
 
         for i, dt in enumerate(dates):
             current_prices = df_prices.loc[dt]
             target_weights = executed_targets_df.loc[dt, symbols]
 
-            # 1. 闲置现金计息
-            cash *= (1.0 + daily_cash_yield)
+            # 1. 闲置现金不计息 (按审计规范彻底去掉现金空仓日利息，保持现金收益恒为 0.0)
+            # cash 保持原值，不增加利息
 
             # 2. 检查是否有需要调仓变动
             if target_weights.max() > 0.5:

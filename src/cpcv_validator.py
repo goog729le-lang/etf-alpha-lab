@@ -66,32 +66,54 @@ class CPCVValidator:
         oos_cagrs = []
 
         for combo in combinations:
-            # 确定测试块并设立前后 Purging 与 Embargoing 隔离带
-            test_indices = set(combo)
-            test_dates = []
+            # 核心修复 P0: 独立回测每个时序区块，彻底消除跨区块时钟断层导致的虚假跳空暴跌
+            all_recs = []
+            curr_cash = 10000.0
             for b_idx in combo:
-                test_dates.extend(blocks[b_idx])
-            test_dates = sorted(test_dates)
+                b_dates = blocks[b_idx]
+                if not b_dates:
+                    continue
+                # 对每个测试区块头部严格执行 purge (消除前序边界重叠)
+                b_start = b_dates[0]
+                purged_b_dates = [d for d in b_dates if d >= (b_start + pd.Timedelta(days=self.purge_days))]
+                if len(purged_b_dates) < 20:
+                    purged_b_dates = b_dates
 
-            if len(test_dates) < 30:
+                pos_b = positions_df.reindex(purged_b_dates).dropna(how="all")
+                if pos_b.empty:
+                    continue
+
+                bt = ETFBacktester(initial_cash=curr_cash)
+                df_b, _ = bt.run_backtest(pos_b, panel_data)
+                if not df_b.empty:
+                    all_recs.append(df_b)
+                    curr_cash = df_b["nav"].iloc[-1]
+
+            if not all_recs:
                 continue
 
-            # 提取测试区间持仓，并在头部切除 purge_days，尾部追加 embargo 保护
-            test_start = test_dates[0]
-            test_end = test_dates[-1]
+            # 拼接各区块真实收益率序列 (无跨期假跳空)
+            rets = pd.concat([r["return"] for r in all_recs])
+            if len(rets) < 30:
+                continue
 
-            # 净化测试区间 (切掉头部受到训练集滞后影响的边界)
-            purged_test_dates = [d for d in test_dates if d >= (test_start + pd.Timedelta(days=self.purge_days))]
-            if len(purged_test_dates) < 20:
-                purged_test_dates = test_dates
+            nav_series = (1.0 + rets).cumprod() * 10000.0
+            peak = nav_series.cummax()
+            mdd = float(abs((nav_series - peak) / peak).max() * 100.0)
 
-            pos_sub = positions_df.reindex(purged_test_dates).dropna(how="all")
-            df_rec, metrics = backtester.run_backtest(pos_sub, panel_data)
-            if metrics:
-                oos_sharpes.append(metrics["sharpe_ratio"])
-                oos_max_dds.append(metrics["max_drawdown_pct"])
-                oos_cagrs.append(metrics["cagr_pct"])
+            daily_rf = (1.0 + 0.02) ** (1.0 / 242.0) - 1.0
+            excess = rets - daily_rf
+            vol = float(rets.std(ddof=1))
+            sr = float((excess.mean() / (vol + 1e-8)) * np.sqrt(242.0))
 
+            total_days = len(rets)
+            years = total_days / 242.0
+            final_nav = float(nav_series.iloc[-1])
+            cagr = float(((final_nav / 10000.0) ** (1.0 / max(years, 0.1)) - 1.0) * 100.0)
+
+            oos_sharpes.append(sr)
+            oos_max_dds.append(mdd)
+            oos_cagrs.append(cagr)
         if not oos_sharpes:
             return {
                 "cpcv_valid": False,
@@ -106,7 +128,7 @@ class CPCVValidator:
         mean_sharpe = float(np.mean(oos_sharpes))
         worst_sharpe = float(np.min(oos_sharpes))
         best_sharpe = float(np.max(oos_sharpes))
-        std_sharpe = float(np.std(oos_sharpes))
+        std_sharpe = float(np.std(oos_sharpes, ddof=1)) if len(oos_sharpes) > 1 else 0.0
         mean_max_dd = float(np.mean(oos_max_dds))
         worst_max_dd = float(np.max(oos_max_dds))
 

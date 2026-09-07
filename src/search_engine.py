@@ -200,12 +200,14 @@ def run_pipeline():
     # 全样本回测 (供真实资金参考)
     rec_full, m_full = backtester.run_backtest(champ_pos_df, panel_data)
 
-    # DSR 极值通缩惩罚审计 (总试验次数按网格总数计算)
+    # DSR 极值通缩惩罚审计 (严格在训练期收益上执行，杜绝偷用 2025+ 盲测期虚增样本量与显著性)
     total_effective_trials = len(evaluated_strategies)
     var_trials_sr = float(np.var(sharpe_list, ddof=1)) if len(sharpe_list) > 1 else 0.20
 
-    dsr_full = DSRAuditor.calculate_dsr(
-        returns=rec_full["return"],
+    pos_train_champ = champ_pos_df.loc[champ_pos_df.index <= pd.to_datetime(TRAIN_END_DATE)]
+    rec_train_champ, m_train_champ = backtester.run_backtest(pos_train_champ, panel_data)
+    dsr_audit = DSRAuditor.calculate_dsr(
+        returns=rec_train_champ["return"],
         trials_count=total_effective_trials,
         var_trials_sharpe=var_trials_sr
     )
@@ -222,7 +224,7 @@ def run_pipeline():
     rec_ood, m_ood = backtester.run_backtest(ood_pos, panel_data)
     is_ood_passed = (m_ood.get("sharpe_ratio", -1) >= 0.40 and m_ood.get("max_drawdown_pct", 100) <= 40.0)
 
-    # 沪深 300 基准全样本现算
+    # 沪深 300 基准全样本现算 (含超额算术夏普与卡玛)
     bench_df = panel_data["510300"].set_index("date")["close"].reindex(dates).ffill()
     bench_initial = bench_df.iloc[0]
     bench_final = bench_df.iloc[-1]
@@ -233,12 +235,20 @@ def run_pipeline():
     bench_dd = (bench_df - bench_peak) / bench_peak
     bench_max_dd = abs(bench_dd.min())
     bench_final_nav = INITIAL_CASH * (bench_final / bench_initial)
+    bench_calmar = bench_cagr / (bench_max_dd + 1e-8)
+
+    bench_ret = bench_df.pct_change().dropna()
+    daily_rf = (1.0 + 0.02) ** (1.0 / 242.0) - 1.0
+    bench_excess = bench_ret - daily_rf
+    bench_sharpe = (bench_excess.mean() / (bench_ret.std(ddof=1) + 1e-8)) * np.sqrt(242.0)
 
     benchmark_stats = {
         "final_nav": round(float(bench_final_nav), 2),
         "total_return_pct": round(float(bench_total_ret * 100), 2),
         "cagr_pct": round(float(bench_cagr * 100), 2),
         "max_drawdown_pct": round(float(bench_max_dd * 100), 2),
+        "sharpe_ratio": round(float(bench_sharpe), 3),
+        "calmar_ratio": round(float(bench_calmar), 3),
     }
 
     # 导出全新产物
@@ -252,7 +262,7 @@ def run_pipeline():
             "cpcv_metrics": champion_candidate["cpcv"],
             "oos_blind_audit_metrics": m_oos_audit,
             "full_sample_metrics": m_full,
-            "dsr_metrics": dsr_full,
+            "dsr_metrics": dsr_audit,
             "ood_stress_metrics": m_ood,
             "ood_passed": is_ood_passed,
             "benchmark_stats": benchmark_stats,
@@ -269,7 +279,7 @@ def run_pipeline():
         champion=champion_candidate,
         full_metrics=m_full,
         oos_audit=m_oos_audit,
-        dsr=dsr_full,
+        dsr=dsr_audit,
         ood=m_ood,
         ood_passed=is_ood_passed,
         bench=benchmark_stats,
@@ -281,27 +291,38 @@ def run_pipeline():
 
 def write_dynamic_report(champion, full_metrics, oos_audit, dsr, ood, ood_passed, bench, rec, report_path):
     rec_copy = rec.copy()
+    # 严格以上年末净值为锚定基准连续计算年度收益，杜绝漏计首日损益
+    year_ends = rec_copy["nav"].resample("YE").last()
+    year_ends.index = [d if d < rec_copy.index[-1] else rec_copy.index[-1] for d in year_ends.index]
+    year_ends = year_ends[~year_ends.index.duplicated(keep="last")]
+    year_ends_series = pd.concat([pd.Series([INITIAL_CASH], index=[rec_copy.index[0] - pd.Timedelta(days=1)]), year_ends])
+    yearly_returns = year_ends_series.pct_change().dropna()
     rec_copy["year"] = rec_copy.index.year
+
     yearly_rows = []
-    for yr, grp in rec_copy.groupby("year"):
-        yr_ret = (grp["nav"].iloc[-1] / grp["nav"].iloc[0]) - 1.0
-        yr_dd = (grp["nav"] / grp["nav"].cummax() - 1.0).min()
-        yearly_rows.append(f"| **{yr} 年** | {yr_ret*100:+.2f}% | {yr_dd*100:.2f}% |")
+    for dt, yr_ret in yearly_returns.items():
+        yr = dt.year
+        grp = rec_copy[rec_copy["year"] == yr]
+        if not grp.empty:
+            yr_dd = (grp["nav"] / grp["nav"].cummax() - 1.0).min()
+            yearly_rows.append(f"| **{yr} 年** | {yr_ret*100:+.2f}% | {yr_dd*100:.2f}% |")
     yearly_table_str = "\n".join(yearly_rows)
 
     cpcv = champion["cpcv"]
     p = champion["params"]
+    profit_multiple = (full_metrics.get("final_nav", INITIAL_CASH) - INITIAL_CASH) / INITIAL_CASH
+    trades_per_year = full_metrics.get("total_trades", 0) / max(full_metrics.get("total_days", 1) / 242.0, 0.1)
+    cagr_excess = full_metrics.get("cagr_pct", 0.0) - bench.get("cagr_pct", 0.0)
 
     if dsr["is_significant_95"]:
-        dsr_verdict = f"✅ **通过 95% 极值检验** (置信度 {dsr['dsr_probability']*100:.2f}%)，统计显著性极高。"
+        dsr_verdict = f"✅ **通过 95% 极值检验** (训练期置信度 {dsr['dsr_probability']*100:.2f}%)，统计显著性极高。"
     elif dsr["is_significant_90"]:
-        dsr_verdict = f"⚠️ **通过 90% 宽容置信检验** (置信度 {dsr['dsr_probability']*100:.2f}%)，具备较强统计支持。"
+        dsr_verdict = f"⚠️ **通过 90% 宽容置信检验** (训练期置信度 {dsr['dsr_probability']*100:.2f}%)，具备较强统计支持。"
     else:
-        dsr_verdict = f"❌ **未通过 DSR 显著性检验** (置信度 {dsr['dsr_probability']*100:.2f}% < 90.00%)，存在多重测试与数据窥探折价风险。"
+        dsr_verdict = f"❌ **未通过 DSR 显著性检验** (训练期置信度 {dsr['dsr_probability']*100:.2f}% < 90.00%)，存在多重测试折价风险。"
 
     cpcv_verdict = "✅ **已通过 CPCV 严苛门槛**" if cpcv.get("is_cpcv_passed") else "❌ **未达 CPCV 严苛设定硬指标**"
     ood_verdict = "✅ **域外压力测试通过**" if ood_passed else f"⚠️ **域外压力测试未达标 (异构资产混入后最大回撤扩大至 {ood.get('max_drawdown_pct')}%)**"
-
     report_content = f"""# 中国 ETF 自适应量化投研系统 (ETF Alpha Lab) 最终研发交付报告
 
 ## 一、 战略定位与工程审计合规原则
@@ -311,7 +332,7 @@ def write_dynamic_report(champion, full_metrics, oos_audit, dsr, ood, ood_passed
    - 动态生存期验证：严格剔除未上市标的，不使用未来上市数据；
 3. **真实资金与物理撮合**：
    - 初始试验资金：`10,000.00 元`，严格按 100 股（1手）向下取整撮合，碎股资金自动保留；
-   - 双边扣除万分之三佣金 + 1 跳保守滑点，闲置现金享受年化 2.0% 货币基金日化计息；
+   - 双边扣除万分之三佣金 + 1 跳保守滑点，闲置现金严格保持零利息（彻底杜绝货基灌水虚增净值与胜率）；
 4. **两阶段物理隔离验证 (杜绝 Double Dipping)**：
    - **模型选拔期 (2018-01-02 至 2024-12-31)**：仅在训练期内运行 CPCV 组合净化交叉检验；
    - **独立终审盲测期 (2025-01-01 至 2026-09-07)**：此区间数据**从未参与过任何参数搜索与模型选拔**，作为独立终审的纯样本外见证。
@@ -323,9 +344,9 @@ def write_dynamic_report(champion, full_metrics, oos_audit, dsr, ood, ood_passed
 * **策略家族**: `{champion['family']}`
 * **策略配置参数**: 动量回溯窗口 = `{p['mom']}日`, 均线滤波窗口 = `{p['ma']}日`, 防守模式 = `{p['def']}`
 * **执行机制**:
-  - 每月末依据沪深300（60日均线）判断大盘环境；大盘破位则 100% 现金空仓避险；
+  - 每月末依据沪深300（{p['ma']}日均线）判断大盘环境；大盘破位则 100% 现金空仓避险；
   - 大盘多头时，在已上市的 11 大行业中挑选动量龙头全仓买入；
-  - 盘中持仓破位跌超 2.0% 立即无条件切回现金断路保命。
+  - 日收盘持仓破自身均线 2.0% 触发信号，次日 (T+1) 收盘执行清仓切回现金断路保命。
 
 ---
 
@@ -336,14 +357,14 @@ def write_dynamic_report(champion, full_metrics, oos_audit, dsr, ood, ood_passed
 | 核心指标维度 | 策略实测值 | 沪深300买入持有基准 (510300) | 业绩评价与超额 |
 | :--- | :---: | :---: | :--- |
 | **初始试验本金** | **10,000.00 元** | 10,000.00 元 | 严格整手撮合，无杠杆 |
-| **期末总资产净值** | **{full_metrics.get('final_nav'):.2f} 元** | {bench.get('final_nav'):.2f} 元 | **净赚近 6 倍** |
+| **期末总资产净值** | **{full_metrics.get('final_nav'):.2f} 元** | {bench.get('final_nav'):.2f} 元 | **净赚 {profit_multiple:.2f} 倍** |
 | **全期累计收益率** | **{full_metrics.get('total_return_pct'):.2f}%** | {bench.get('total_return_pct'):.2f}% | 显著跑赢被动买入持有 |
-| **年化复合收益率 (CAGR)** | **{full_metrics.get('cagr_pct'):.2f}%** | {bench.get('cagr_pct'):.2f}% | 年化复合超额超 19% |
-| **标准算术年化夏普比率** | **{full_metrics.get('sharpe_ratio'):.3f}** | 0.080 | 统一算术超额口径 |
+| **年化复合收益率 (CAGR)** | **{full_metrics.get('cagr_pct'):.2f}%** | {bench.get('cagr_pct'):.2f}% | 年化复合超额 {cagr_excess:.2f}% |
+| **标准算术年化夏普比率** | **{full_metrics.get('sharpe_ratio'):.3f}** | {bench.get('sharpe_ratio'):.3f} | 统一算术超额口径 |
 | **历史最大回撤 (MaxDD)** | **{full_metrics.get('max_drawdown_pct'):.2f}%** | {bench.get('max_drawdown_pct'):.2f}% | 规避历次单边主跌浪 |
-| **卡玛比率 (Calmar)** | **{full_metrics.get('calmar_ratio'):.3f}** | 0.075 | 收益回撤比较高 |
+| **卡玛比率 (Calmar)** | **{full_metrics.get('calmar_ratio'):.3f}** | {bench.get('calmar_ratio'):.3f} | 收益回撤比较高 |
 | **单边年化换手率** | **{full_metrics.get('annual_turnover_rate'):.2f} 倍/年** | 0.00 | 交易频率适中，摩擦完全可控 |
-| **全期总调仓交易次数** | **{full_metrics.get('total_trades')} 次** | 1 次 | 平均每年仅 8 次调仓 |
+| **全期总调仓交易次数** | **{full_metrics.get('total_trades')} 次** | 1 次 | 平均每年约 {trades_per_year:.1f} 次调仓 |
 
 ### 2. 独立终审盲测期业绩 (2025-01-01 ~ 2026-09-07，未参与任何参数挑选)
 * **独立样本外总收益率**: **{oos_audit.get('total_return_pct'):.2f}%**
@@ -376,7 +397,7 @@ def write_dynamic_report(champion, full_metrics, oos_audit, dsr, ood, ood_passed
 * DSR 概率检验统计量: `{dsr.get('dsr_probability'):.4f}`
 * **DSR 审核结论**: {dsr_verdict}
 
-### 3. OOD 域外压力测试 (注入未训练的豆粕、养殖、钢铁、白酒等异构资产)
+### 3. OOD 域外压力测试 (注入未训练的豆粕、养殖、钢铁等纯域外异构资产)
 * 压力测试年化收益率: **{ood.get('cagr_pct'):.2f}%**
 * 压力测试年化夏普: **{ood.get('sharpe_ratio'):.3f}**
 * 压力测试最大回撤: **{ood.get('max_drawdown_pct'):.2f}%**
