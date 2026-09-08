@@ -39,7 +39,7 @@ class DSRAuditor:
         k = max(int(trials_count), 2)
         
         z_k = (1.0 - euler_mascheroni) * stats.norm.ppf(1.0 - 1.0 / k) + euler_mascheroni * stats.norm.ppf(1.0 - 1.0 / (k * np.e))
-        expected_max_sr_annual = np.sqrt(max(var_trials_sharpe, 0.05)) * z_k
+        expected_max_sr_annual = np.sqrt(max(var_trials_sharpe, 1e-6)) * z_k
         expected_max_sr_daily = expected_max_sr_annual / np.sqrt(242.0)
 
         # 概率夏普比率 (PSR) 统计误差

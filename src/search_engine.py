@@ -43,15 +43,15 @@ def load_all_data() -> dict:
 def generate_domestic_sector_positions(
     panel_data: dict,
     dates: list,
-    monthly_dates: set,
+    rebalance_dates: set,
     sector_pool: list,
     defense_mode: str = "CASH",
     mom_window: int = 40,
     ma_filter_window: int = 60,
     canary_sym: str = "510300",
 ) -> pd.DataFrame:
-    """生成纯境内 A 股多行业轮动持仓 (严格动态上市检验 + 金丝雀空仓断路器)"""
-    all_syms = list(set(sector_pool + [canary_sym, "518880", "510880"]))
+    """生成纯境内 A 股多行业轮动持仓 (严格动态上市检验 + 金丝雀空仓/动态多资产断路器)"""
+    all_syms = list(set(sector_pool + [canary_sym, "518880", "511010", "510880"]))
     close_df = pd.DataFrame(
         {s: panel_data[s].set_index("date")["close"].reindex(dates) for s in all_syms if s in panel_data},
         index=dates
@@ -77,8 +77,8 @@ def generate_domestic_sector_positions(
             if pd.notna(p_cur) and pd.notna(m_cur) and p_cur < m_cur * 0.98:
                 cur_sym = "CASH"
 
-        # 月末定时再平衡决策
-        if dt in monthly_dates:
+        # 定时再平衡决策 (支持月度与双周动态频率)
+        if dt in rebalance_dates:
             sc = mom_df.loc[dt]
             # 大盘金丝雀在均线上方才允许开仓进攻
             if pd.notna(c_p) and pd.notna(c_m) and c_p > c_m:
@@ -92,13 +92,29 @@ def generate_domestic_sector_positions(
                 else:
                     cur_sym = "CASH"
             else:
-                # 大盘走熊，无条件执行防守/空仓
+                # 大盘走熊，根据防守模式执行空仓或动态避险
                 if defense_mode == "CASH":
                     cur_sym = "CASH"
                 elif defense_mode == "518880":
                     cur_sym = "518880" if (pd.notna(p.get("518880")) and pd.notna(m.get("518880")) and p["518880"] > m["518880"]) else "CASH"
+                elif defense_mode == "511010":
+                    cur_sym = "511010" if (pd.notna(p.get("511010")) and pd.notna(m.get("511010")) and p["511010"] > m["511010"]) else "CASH"
                 elif defense_mode == "510880":
                     cur_sym = "510880" if (pd.notna(p.get("510880")) and pd.notna(m.get("510880")) and p["510880"] > m["510880"]) else "CASH"
+                elif defense_mode == "DYNAMIC_CANARY":
+                    # 动态金丝雀防守：黄金 vs 国债 vs 现金
+                    p_gold, m_gold, sc_gold = p.get("518880"), m.get("518880"), sc.get("518880")
+                    p_bond, m_bond, sc_bond = p.get("511010"), m.get("511010"), sc.get("511010")
+                    gold_ok = pd.notna(p_gold) and pd.notna(m_gold) and p_gold > m_gold and pd.notna(sc_gold) and sc_gold > 0
+                    bond_ok = pd.notna(p_bond) and pd.notna(m_bond) and p_bond > m_bond and pd.notna(sc_bond) and sc_bond > 0
+                    if gold_ok and bond_ok:
+                        cur_sym = "518880" if sc_gold >= sc_bond else "511010"
+                    elif gold_ok:
+                        cur_sym = "518880"
+                    elif bond_ok:
+                        cur_sym = "511010"
+                    else:
+                        cur_sym = "CASH"
 
         targets.append(cur_sym)
 
@@ -112,10 +128,21 @@ def run_pipeline():
     panel_data = load_all_data()
     dates = pd.to_datetime(panel_data["510300"]["date"]).tolist()
     
-    # 构建自然月末决策交易日
-    df_d = pd.DataFrame({"date": dates})
-    df_d["year_month"] = df_d["date"].dt.strftime("%Y-%m")
-    monthly_dates = set(pd.to_datetime(df_d.groupby("year_month")["date"].last().values))
+    # 构建自然月末决策交易日 (严格跨月判定，杜绝未完结月份的月中截断日被误判为月末)
+    s_dates = pd.Series(dates)
+    is_month_end = (s_dates.dt.month != s_dates.shift(-1).dt.month) & s_dates.shift(-1).notna()
+    last_d = s_dates.iloc[-1]
+    if (last_d + pd.Timedelta(days=1)).month != last_d.month:
+        is_month_end.iloc[-1] = True
+    monthly_dates = set(s_dates[is_month_end])
+
+    # 构建双周 (每 10 个交易日) 动态决策交易日
+    biweekly_dates = set(s_dates.iloc[::10])
+
+    rebalance_options = [
+        ("MONTHLY", monthly_dates),
+        ("BI_WEEKLY", biweekly_dates),
+    ]
 
     backtester = ETFBacktester(execution_timing="T+1_CLOSE")
     cpcv = CPCVValidator(min_mean_sharpe=0.50, min_worst_sharpe=0.0, max_worst_mdd=35.0)
@@ -130,19 +157,22 @@ def run_pipeline():
         "159928", "512690", "512010", "512660", "516160"
     ]
 
-    # 构建全新的网格搜索空间
-    mom_windows = [30, 40, 60, 90, 120]
-    ma_windows = [40, 60, 90, 120]
-    defense_modes = ["CASH", "518880"]
+    # 构建全新的拓展网格搜索空间 (覆盖行业常用 20d 月线、30d、40d 原冠军窗口、60d 季线、90d)
+    mom_windows = [20, 30, 40, 60, 90]
+    ma_windows = [20, 40, 60, 90]
+    defense_modes = ["CASH", "518880", "511010", "DYNAMIC_CANARY"]
 
     evaluated_strategies = []
     sharpe_list = []
 
-    print(f"[*] 启动纯境内 A 股多行业全网格搜索 ({len(mom_windows)*len(ma_windows)*len(defense_modes)} 组候选)...")
-    for mom_w, ma_w, def_m in itertools.product(mom_windows, ma_windows, defense_modes):
-        cfg = {"mom": mom_w, "ma": ma_w, "def": def_m}
+    total_configs = len(mom_windows) * len(ma_windows) * len(rebalance_options) * len(defense_modes)
+    print(f"[*] 启动纯境内 A 股多行业全网格搜索 ({total_configs} 组异构候选)...")
+    for mom_w, ma_w, (rebal_name, rebal_dates), def_m in itertools.product(
+        mom_windows, ma_windows, rebalance_options, defense_modes
+    ):
+        cfg = {"mom": mom_w, "ma": ma_w, "rebal": rebal_name, "def": def_m}
         pos_df = generate_domestic_sector_positions(
-            panel_data, dates, monthly_dates,
+            panel_data, dates, rebal_dates,
             sector_pool=domestic_pool,
             defense_mode=def_m,
             mom_window=mom_w,
@@ -156,7 +186,7 @@ def run_pipeline():
         sharpe_list.append(m_train.get("sharpe_ratio", 0.0))
 
         evaluated_strategies.append({
-            "name": f"Domestic_Sector_Mom{mom_w}_MA{ma_w}_{def_m}",
+            "name": f"Domestic_Sector_Mom{mom_w}_MA{ma_w}_{rebal_name}_{def_m}",
             "family": "Domestic_Sector_Canary",
             "pos_df": pos_df,
             "cpcv": cpcv_res,
@@ -212,10 +242,12 @@ def run_pipeline():
         var_trials_sharpe=var_trials_sr
     )
 
-    # OOD 域外压力测试 (注入未训练的豆粕、养殖、钢铁、白酒等异构资产)
+    # OOD 域外压力测试 (注入未训练的豆粕、养殖、钢铁等纯域外异构资产)
     stress_symbols = list(STRESS_UNIVERSE.keys())
+    rebal_choice = champion_candidate["params"].get("rebal", "MONTHLY")
+    rebal_dates_champ = monthly_dates if rebal_choice == "MONTHLY" else biweekly_dates
     ood_pos = generate_domestic_sector_positions(
-        panel_data, dates, monthly_dates,
+        panel_data, dates, rebal_dates_champ,
         sector_pool=domestic_pool + stress_symbols,
         defense_mode=champion_candidate["params"]["def"],
         mom_window=champion_candidate["params"]["mom"],
@@ -342,9 +374,9 @@ def write_dynamic_report(champion, full_metrics, oos_audit, dsr, ood, ood_passed
 ## 二、 优胜策略：{champion['name']}
 
 * **策略家族**: `{champion['family']}`
-* **策略配置参数**: 动量回溯窗口 = `{p['mom']}日`, 均线滤波窗口 = `{p['ma']}日`, 防守模式 = `{p['def']}`
+* **策略配置参数**: 动量回溯窗口 = `{p['mom']}日`, 均线滤波窗口 = `{p['ma']}日`, 调仓频率 = `{p.get('rebal', 'MONTHLY')}`, 防守模式 = `{p['def']}`
 * **执行机制**:
-  - 每月末依据沪深300（{p['ma']}日均线）判断大盘环境；大盘破位则 100% 现金空仓避险；
+  - 按照 {p.get('rebal', 'MONTHLY')} 定时再平衡，依据沪深300（{p['ma']}日均线）判断大盘多空环境；大盘走熊则按 {p['def']} 执行防守避险；
   - 大盘多头时，在已上市的 11 大行业中挑选动量龙头全仓买入；
   - 日收盘持仓破自身均线 2.0% 触发信号，次日 (T+1) 收盘执行清仓切回现金断路保命。
 

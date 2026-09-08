@@ -54,13 +54,16 @@ class ETFBacktester:
         if len(dates) < 2:
             return pd.DataFrame(), {}
 
-        # 提取对齐价格矩阵 (前向填充，停牌日保持停牌前最新价格计算持仓市值)
+        # 提取对齐价格与成交量矩阵 (价格前向填充计算持仓估值，成交量缺省记 0 用于停牌校验)
         symbols = [c for c in positions_df.columns if c in panel_data]
         price_dict = {}
+        volume_dict = {}
         for sym in symbols:
-            df = panel_data[sym].set_index("date")["close"].reindex(dates).ffill()
-            price_dict[sym] = df
+            df_sym = panel_data[sym].set_index("date")
+            price_dict[sym] = df_sym["close"].reindex(dates).ffill()
+            volume_dict[sym] = df_sym["volume"].reindex(dates).fillna(0.0)
         df_prices = pd.DataFrame(price_dict, index=dates)
+        df_volumes = pd.DataFrame(volume_dict, index=dates)
 
         # 核心修复 1.2: T 日产生的目标持仓信号，滞后到 T+1 日执行撮合 (物理阻断同 bar 乐观成交)
         if self.execution_timing == "T+1_CLOSE":
@@ -89,11 +92,12 @@ class ETFBacktester:
             else:
                 target_sym = None  # 空仓 (CASH)
 
-            # 先卖出非目标标的 (严格检查有有效可成交价，若停牌无法成交则保持原仓位)
+            # 先卖出非目标标的 (严格检查有有效可成交价且当日非停牌，若停牌无法成交则保持原仓位)
             for s in symbols:
                 if s != target_sym and shares_held[s] > 0:
                     curr_p = current_prices[s]
-                    if pd.notna(curr_p) and curr_p > 0:
+                    curr_vol = df_volumes.loc[dt, s]
+                    if pd.notna(curr_p) and curr_p > 0 and curr_vol > 0:
                         sell_shares = shares_held[s]
                         sell_price = max(curr_p - self.slippage_points, 0.001)
                         gross_revenue = sell_shares * sell_price
@@ -105,10 +109,11 @@ class ETFBacktester:
                         total_turnover_amount += gross_revenue
                         trade_count += 1
 
-            # 再买入目标标的
+            # 再买入目标标的 (严格检查有有效可成交价且当日非停牌，停牌标的不可买入)
             if target_sym is not None and shares_held[target_sym] == 0:
                 curr_p = current_prices[target_sym]
-                if pd.notna(curr_p) and curr_p > 0:
+                curr_vol = df_volumes.loc[dt, target_sym]
+                if pd.notna(curr_p) and curr_p > 0 and curr_vol > 0:
                     buy_price = curr_p + self.slippage_points
                     usable_cash = cash / (1.0 + self.commission_rate)
                     max_shares = int(usable_cash // (buy_price * self.lot_size)) * self.lot_size

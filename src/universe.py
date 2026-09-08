@@ -24,6 +24,7 @@ CORE_UNIVERSE = {
     
     # 大消费与医药
     "159928": {"name": "消费ETF", "market": "sz", "sector": "Consumer"},
+    "512690": {"name": "酒ETF", "market": "sh", "sector": "Consumer"},
     "512010": {"name": "医药ETF", "market": "sh", "sector": "Healthcare"},
     
     # 制造周期与新能源

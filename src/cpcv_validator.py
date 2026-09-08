@@ -65,30 +65,34 @@ class CPCVValidator:
         oos_max_dds = []
         oos_cagrs = []
 
+        # 核心优化: 预先独立回测各时序区块 (消除跨组合的重复回测计算)
+        block_recs = {}
+        for b_idx in block_indices:
+            b_dates = blocks[b_idx]
+            if not b_dates:
+                continue
+            # 对每个测试区块头部严格执行 purge，尾部执行 embargo 禁运隔离
+            b_start = b_dates[0]
+            b_end = b_dates[-1]
+            purged_b_dates = [
+                d for d in b_dates
+                if d >= (b_start + pd.Timedelta(days=self.purge_days))
+                and d <= (b_end - pd.Timedelta(days=self.embargo_days))
+            ]
+            if len(purged_b_dates) < 20:
+                purged_b_dates = b_dates
+
+            pos_b = positions_df.reindex(purged_b_dates).dropna(how="all")
+            if pos_b.empty:
+                continue
+
+            bt = ETFBacktester(initial_cash=10000.0)
+            df_b, _ = bt.run_backtest(pos_b, panel_data)
+            if not df_b.empty:
+                block_recs[b_idx] = df_b
+
         for combo in combinations:
-            # 核心修复 P0: 独立回测每个时序区块，彻底消除跨区块时钟断层导致的虚假跳空暴跌
-            all_recs = []
-            curr_cash = 10000.0
-            for b_idx in combo:
-                b_dates = blocks[b_idx]
-                if not b_dates:
-                    continue
-                # 对每个测试区块头部严格执行 purge (消除前序边界重叠)
-                b_start = b_dates[0]
-                purged_b_dates = [d for d in b_dates if d >= (b_start + pd.Timedelta(days=self.purge_days))]
-                if len(purged_b_dates) < 20:
-                    purged_b_dates = b_dates
-
-                pos_b = positions_df.reindex(purged_b_dates).dropna(how="all")
-                if pos_b.empty:
-                    continue
-
-                bt = ETFBacktester(initial_cash=curr_cash)
-                df_b, _ = bt.run_backtest(pos_b, panel_data)
-                if not df_b.empty:
-                    all_recs.append(df_b)
-                    curr_cash = df_b["nav"].iloc[-1]
-
+            all_recs = [block_recs[b_idx] for b_idx in combo if b_idx in block_recs]
             if not all_recs:
                 continue
 

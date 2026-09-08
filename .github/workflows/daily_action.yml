@@ -1,0 +1,52 @@
+name: Daily ETF Alpha Lab Action (14:45 CST)
+
+on:
+  schedule:
+    # 北京时间每天下午 14:45 (UTC 时间 06:45)，每周一至周五
+    - cron: '45 6 * * 1-5'
+  workflow_dispatch: # 允许在 GitHub Actions 页面随时手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  generate-daily-action:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyarrow scipy
+
+      - name: Run Daily Signal Generator (14:45 CST)
+        run: |
+          python src/daily_signal_generator.py
+
+      - name: Display Decision Summary in GitHub Actions
+        run: |
+          if [ -f results/daily_signals/LATEST_ACTION.md ]; then
+            cat results/daily_signals/LATEST_ACTION.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Commit and Push Daily Action Results
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add results/daily_signals/
+          if git diff --cached --quiet; then
+            echo "No signal changes to commit."
+          else
+            TODAY=$(date +'%Y-%m-%d')
+            git commit -m "chore(action): update daily strategy action for ${TODAY} [skip ci]"
+            git push origin main
+          fi
