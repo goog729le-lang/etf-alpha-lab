@@ -1,5 +1,5 @@
 {
-    "generated_at": "2026-09-08 11:57:05",
+    "generated_at": "2026-09-08 09:14:37",
     "trade_date": "2026-09-08",
     "action_type": "HOLD",
     "target_holding": "518880",
@@ -10,10 +10,10 @@
     "stop_loss_triggered": false,
     "market_benchmark": {
         "symbol": "510300 (沪深300ETF)",
-        "current_price": 4.643,
+        "current_price": 4.624,
         "ma_filter": 4.766,
         "status": "跌破均线 (防守模式)"
     },
-    "action_reason": "继续持有 518880 (黄金ETF)。现价 9.106，60日均线 8.762，运行正常无破位。",
+    "action_reason": "继续持有 518880 (黄金ETF)。现价 9.047，60日均线 8.761，运行正常无破位。",
     "champion_strategy": "Domestic_Sector_Mom40_MA60_MONTHLY_DYNAMIC_CANARY"
 }
