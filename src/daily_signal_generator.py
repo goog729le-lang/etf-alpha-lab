@@ -20,6 +20,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 from config import RAW_DATA_DIR, RULES_DIR, RESULTS_DIR
 from universe import get_all_symbols
+from feishu_notifier import send_feishu_notification
 
 
 SIGNALS_DIR = RESULTS_DIR / "daily_signals"
@@ -269,6 +270,10 @@ def generate_today_action():
     md_path = SIGNALS_DIR / "LATEST_ACTION.md"
     write_action_markdown(action_result, md_path)
     print(f"[+] 今日交易指令已生成 Markdown: {md_path}")
+
+    # 飞书互动卡片多端推送 (若配置了 FEISHU_APP_ID / FEISHU_APP_SECRET 等凭据)
+    send_feishu_notification(action_result)
+
     return action_result
 
 

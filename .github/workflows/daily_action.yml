@@ -29,6 +29,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Daily Signal Generator (14:45 CST)
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_OPEN_ID: ${{ secrets.FEISHU_OPEN_ID }}
+          FEISHU_USER_MOBILE: ${{ secrets.FEISHU_USER_MOBILE }}
         run: |
           python src/daily_signal_generator.py
 
