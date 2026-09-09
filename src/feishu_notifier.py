@@ -69,6 +69,8 @@ def build_feishu_card(action_res: dict) -> dict:
     bench = action_res.get("market_benchmark", {})
     bench_price = bench.get("current_price", "--")
     bench_ma = bench.get("ma_filter", "--")
+    bench_br = bench.get("breadth_pct", "--")
+    bench_br_th = bench.get("breadth_threshold_pct", "--")
     bench_status = bench.get("status", "--")
 
     card = {
@@ -123,7 +125,7 @@ def build_feishu_card(action_res: dict) -> dict:
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"📊 **大盘基准环境 (510300)**\n* **现价 (14:45)**: `{bench_price}` | **60日均线**: `{bench_ma}`\n* **多空研判**: **{bench_status}**"
+                    "content": f"📊 **大盘基准与市场广度 (510300)**\n* **现价 (14:45)**: `{bench_price}` | **60日均线**: `{bench_ma}`\n* **行业市场广度**: `{bench_br}%` (多头门槛: `{bench_br_th}%`)\n* **多空研判**: **{bench_status}**"
                 }
             },
             {

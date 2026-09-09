@@ -88,9 +88,12 @@ def generate_today_action():
     ma_w = p.get("ma", 60)
     def_m = p.get("def", "DYNAMIC_CANARY")
     rebal_freq = p.get("rebal", "MONTHLY")
+    br_th = p.get("br", 0.0)
+    pool_name = p.get("pool", "CORE_11")
+    mom_type = p.get("mom_type", "RES") # "RES" 剥离大盘Beta残差动量 vs "RAW" 区间涨幅
     
     print(f"[*] 当前冠军策略: {champ_meta['champion_name']}")
-    print(f"[*] 策略参数: 动量回溯={mom_w}日, 均线滤波={ma_w}日, 调仓频率={rebal_freq}, 防守模式={def_m}")
+    print(f"[*] 策略参数: 资产池={pool_name}, 动量算法={mom_type}, 动量回溯={mom_w}日, 均线滤波={ma_w}日, 广度阈值={br_th*100:.0f}%, 调仓频率={rebal_freq}, 防守模式={def_m}")
 
     # 2. 读取历史持仓最新记录 (确认昨日/当前实盘所持标的)
     nav_csv_p = RESULTS_DIR / "reports" / "champion_daily_nav.csv"
@@ -142,19 +145,53 @@ def generate_today_action():
 
     df_close = pd.DataFrame(close_series_dict).sort_index().ffill()
     
-    # 7. 计算关键技术指标
+    # 7. 计算关键技术指标 (严格向后滚动，零前视)
     df_ma = df_close.rolling(ma_w, min_periods=ma_w // 2).mean()
-    df_mom = df_close.pct_change(mom_w, fill_method=None)
+    df_raw_mom = df_close.pct_change(mom_w, fill_method=None)
+
+    # 若策略为残差动量，则剥离沪深300同期Beta
+    if mom_type == "RES":
+        ret_1d = df_close.pct_change(fill_method=None)
+        r_m = ret_1d["510300"]
+        r_m_cum = (1.0 + r_m).rolling(mom_w).apply(np.prod, raw=True) - 1.0
+        var_m = r_m.rolling(mom_w).var()
+
+        df_res_mom = pd.DataFrame(index=df_close.index, columns=domestic_pool, dtype=float)
+        for s in domestic_pool:
+            if s in ret_1d:
+                cov = ret_1d[s].rolling(mom_w).cov(r_m)
+                beta = cov / (var_m + 1e-8)
+                r_i_cum = (1.0 + ret_1d[s]).rolling(mom_w).apply(np.prod, raw=True) - 1.0
+                df_res_mom[s] = r_i_cum - beta * r_m_cum
+        df_mom = df_res_mom
+    else:
+        df_mom = df_raw_mom
 
     today_p = df_close.loc[today_dt]
     today_m = df_ma.loc[today_dt]
     today_mom = df_mom.loc[today_dt]
+    today_raw_mom = df_raw_mom.loc[today_dt]
 
-    # 大盘金丝雀 (510300) 状态
+    # 纯净无偏的动态上市市场广度计算
+    valid_mask = df_close[domestic_pool].notna() & df_ma[domestic_pool].notna()
+    valid_counts = valid_mask.sum(axis=1)
+    above_ma = (df_close[domestic_pool] > df_ma[domestic_pool]) & valid_mask
+    breadth_df = above_ma.sum(axis=1) / valid_counts.replace(0, np.nan)
+    today_br = breadth_df.loc[today_dt]
+
+    # 大盘金丝雀 (510300) 与市场广度双重状态
     c_p = today_p.get("510300", np.nan)
     c_m = today_m.get("510300", np.nan)
-    is_market_bull = bool(pd.notna(c_p) and pd.notna(c_m) and c_p > c_m)
-    market_status = "多头运行 (进攻模式)" if is_market_bull else "跌破均线 (防守模式)"
+    c_bull = bool(pd.notna(c_p) and pd.notna(c_m) and c_p > c_m)
+    br_ok = (pd.isna(today_br) or today_br >= br_th) if br_th > 0.0 else True
+    is_market_bull = c_bull and br_ok
+
+    if is_market_bull:
+        market_status = f"健康多头 (大盘>{ma_w}MA 且 行业广度{today_br*100:.1f}%>={br_th*100:.0f}%)"
+    elif not c_bull:
+        market_status = f"跌破均线 (大盘<={ma_w}MA，防守模式)"
+    else:
+        market_status = f"广度失血 (大盘虽在均线上但仅{today_br*100:.1f}%行业多头<{br_th*100:.0f}%，防守模式)"
 
     # 8. 判断今日是否为月末调仓再平衡日
     # 若下一个自然日跨月，或今日为周五且下周一跨月，则触发月末决策
@@ -201,22 +238,22 @@ def generate_today_action():
                 target_holding = "CASH"
                 action_reason = "【月末防守】大盘虽在均线上方，但 11 大行业无一满足多头动量过滤条件，全部切回现金 CASH。"
         else:
-            # 大盘走熊 -> 动态金丝雀防守
+            # 大盘走熊 -> 动态金丝雀防守 (防守标的按绝对区间动量评估)
             if def_m == "DYNAMIC_CANARY":
-                p_gold, m_gold, sc_gold = today_p.get("518880"), today_m.get("518880"), today_mom.get("518880")
-                p_bond, m_bond, sc_bond = today_p.get("511010"), today_m.get("511010"), today_mom.get("511010")
+                p_gold, m_gold, sc_gold = today_p.get("518880"), today_m.get("518880"), today_raw_mom.get("518880")
+                p_bond, m_bond, sc_bond = today_p.get("511010"), today_m.get("511010"), today_raw_mom.get("511010")
                 gold_ok = pd.notna(p_gold) and pd.notna(m_gold) and p_gold > m_gold and pd.notna(sc_gold) and sc_gold > 0
                 bond_ok = pd.notna(p_bond) and pd.notna(m_bond) and p_bond > m_bond and pd.notna(sc_bond) and sc_bond > 0
                 if gold_ok and bond_ok:
                     target_holding = "518880" if sc_gold >= sc_bond else "511010"
                     asset_name = all_sym_dict.get(target_holding, {}).get("name", "")
-                    action_reason = f"【月末动态金丝雀】大盘跌破均线，避险资产中黄金与国债皆走强，动量更优选持有 {target_holding} ({asset_name})。"
+                    action_reason = f"【月末动态金丝雀】大盘走熊或广度失血，避险资产中黄金与国债皆走强，动量更优选持有 {target_holding} ({asset_name})。"
                 elif gold_ok:
                     target_holding = "518880"
-                    action_reason = "【月末动态金丝雀】大盘跌破均线，国债走弱，黄金站上均线，持有黄金 518880。"
+                    action_reason = "【月末动态金丝雀】大盘走熊或广度失血，国债走弱，黄金站上均线，持有黄金 518880。"
                 elif bond_ok:
                     target_holding = "511010"
-                    action_reason = "【月末动态金丝雀】大盘跌破均线，黄金走弱，国债站上均线，持有国债 511010。"
+                    action_reason = "【月末动态金丝雀】大盘走熊或广度失血，黄金走弱，国债站上均线，持有国债 511010。"
                 else:
                     target_holding = "CASH"
                     action_reason = "【月末动态金丝雀】大盘走熊且黄金、国债均跌破均线，100% 切换为 CASH 现金空仓避险。"
@@ -254,6 +291,8 @@ def generate_today_action():
             "symbol": "510300 (沪深300ETF)",
             "current_price": round(float(c_p), 3) if pd.notna(c_p) else None,
             "ma_filter": round(float(c_m), 3) if pd.notna(c_m) else None,
+            "breadth_pct": round(float(today_br * 100), 1) if pd.notna(today_br) else None,
+            "breadth_threshold_pct": round(float(br_th * 100), 1),
             "status": market_status,
         },
         "action_reason": action_reason,
@@ -313,6 +352,7 @@ def write_action_markdown(res: dict, md_path: Path):
 * **大盘基准**: `{res['market_benchmark']['symbol']}`
 * **即时价格 (14:45)**: `{res['market_benchmark']['current_price']}`
 * **60日生命线**: `{res['market_benchmark']['ma_filter']}`
+* **行业市场广度**: `{res['market_benchmark']['breadth_pct']}%` (入场多头门槛: `{res['market_benchmark']['breadth_threshold_pct']}%`)
 * **多空研判**: **{res['market_benchmark']['status']}**
 
 ---

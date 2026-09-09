@@ -31,6 +31,17 @@ CORE_UNIVERSE = {
     "516160": {"name": "新能源ETF", "market": "sh", "sector": "NewEnergy"},
     "512660": {"name": "军工ETF", "market": "sh", "sector": "Defense"},
     
+    # 资源与上游周期 (高股息与大宗)
+    "515220": {"name": "煤炭ETF", "market": "sh", "sector": "Energy_Coal"},
+    "512400": {"name": "有色金属ETF", "market": "sh", "sector": "Materials_Metals"},
+    
+    # 数字传媒与新兴应用
+    "512980": {"name": "传媒ETF", "market": "sh", "sector": "TMT_Media"},
+    
+    # 中小盘宽基风格
+    "510500": {"name": "500ETF", "market": "sh", "sector": "MidCap_Core"},
+    "512100": {"name": "1000ETF", "market": "sh", "sector": "SmallCap_Growth"},
+    
     # 全球多元配置 (T+0 跨境高弹性)
     "513100": {"name": "纳斯达克ETF", "market": "sh", "sector": "Global"},
     "513050": {"name": "中概互联ETF", "market": "sh", "sector": "Global_Tech"},

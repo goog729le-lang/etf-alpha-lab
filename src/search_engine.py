@@ -46,11 +46,13 @@ def generate_domestic_sector_positions(
     rebalance_dates: set,
     sector_pool: list,
     defense_mode: str = "CASH",
+    mom_type: str = "RES", # "RES" 为严格因果滚动残差动量, "RAW" 为普通区间涨幅
     mom_window: int = 40,
     ma_filter_window: int = 60,
     canary_sym: str = "510300",
+    breadth_threshold: float = 0.0,
 ) -> pd.DataFrame:
-    """生成纯境内 A 股多行业轮动持仓 (严格动态上市检验 + 金丝雀空仓/动态多资产断路器)"""
+    """生成纯境内 A 股多行业轮动持仓 (严格向后滚动残差动量 + 纯净动态市场广度 + 动态避险断路器)"""
     all_syms = list(set(sector_pool + [canary_sym, "518880", "511010", "510880"]))
     close_df = pd.DataFrame(
         {s: panel_data[s].set_index("date")["close"].reindex(dates) for s in all_syms if s in panel_data},
@@ -58,8 +60,32 @@ def generate_domestic_sector_positions(
     )
     
     ma_df = close_df.rolling(ma_filter_window, min_periods=ma_filter_window // 2).mean()
-    mom_df = close_df.pct_change(mom_window, fill_method=None)
     canary_ma = close_df[canary_sym].rolling(ma_filter_window, min_periods=ma_filter_window // 2).mean()
+
+    # 1. 动量得分矩阵计算 (严格因果律: 向后滚动计算，绝无未来函数)
+    raw_mom = close_df.pct_change(mom_window, fill_method=None)
+    if mom_type == "RES":
+        ret_1d = close_df.pct_change(fill_method=None)
+        r_m = ret_1d[canary_sym]
+        r_m_cum = (1.0 + r_m).rolling(mom_window).apply(np.prod, raw=True) - 1.0
+        var_m = r_m.rolling(mom_window).var()
+
+        res_mom = pd.DataFrame(index=dates, columns=sector_pool, dtype=float)
+        for s in sector_pool:
+            if s in ret_1d:
+                cov = ret_1d[s].rolling(mom_window).cov(r_m)
+                beta = cov / (var_m + 1e-8)
+                r_i_cum = (1.0 + ret_1d[s]).rolling(mom_window).apply(np.prod, raw=True) - 1.0
+                res_mom[s] = r_i_cum - beta * r_m_cum
+        mom_df = res_mom
+    else:
+        mom_df = raw_mom
+
+    # 2. 纯净无偏的动态上市市场广度计算 (严格按当日已上市且具备有效均线的资产作为动态分母，杜绝未上市偏差)
+    valid_mask = close_df[sector_pool].notna() & ma_df[sector_pool].notna()
+    valid_counts = valid_mask.sum(axis=1)
+    above_ma = (close_df[sector_pool] > ma_df[sector_pool]) & valid_mask
+    breadth_df = above_ma.sum(axis=1) / valid_counts.replace(0, np.nan)
 
     targets = []
     cur_sym = "CASH"
@@ -69,6 +95,7 @@ def generate_domestic_sector_positions(
         m = ma_df.loc[dt]
         c_p = close_df.loc[dt, canary_sym]
         c_m = canary_ma.loc[dt]
+        br = breadth_df.loc[dt]
 
         # 每日盘中/日度止损断路器: 破自身均线 2% 立即清仓切 CASH
         if cur_sym != "CASH":
@@ -80,8 +107,12 @@ def generate_domestic_sector_positions(
         # 定时再平衡决策 (支持月度与双周动态频率)
         if dt in rebalance_dates:
             sc = mom_df.loc[dt]
-            # 大盘金丝雀在均线上方才允许开仓进攻
-            if pd.notna(c_p) and pd.notna(c_m) and c_p > c_m:
+            # 市场大盘与行业广度双重金丝雀多空判定
+            c_bull = pd.notna(c_p) and pd.notna(c_m) and c_p > c_m
+            br_ok = (pd.isna(br) or br >= breadth_threshold) if breadth_threshold > 0.0 else True
+            market_bull = c_bull and br_ok
+
+            if market_bull:
                 valid_atk = [
                     s for s in sector_pool
                     if pd.notna(p.get(s)) and pd.notna(m.get(s)) and p[s] > m[s] and pd.notna(sc.get(s)) and sc[s] > 0
@@ -92,7 +123,8 @@ def generate_domestic_sector_positions(
                 else:
                     cur_sym = "CASH"
             else:
-                # 大盘走熊，根据防守模式执行空仓或动态避险
+                # 大盘走熊或广度恶化，根据防守模式执行空仓或动态避险
+                raw_sc = raw_mom.loc[dt]
                 if defense_mode == "CASH":
                     cur_sym = "CASH"
                 elif defense_mode == "518880":
@@ -103,8 +135,8 @@ def generate_domestic_sector_positions(
                     cur_sym = "510880" if (pd.notna(p.get("510880")) and pd.notna(m.get("510880")) and p["510880"] > m["510880"]) else "CASH"
                 elif defense_mode == "DYNAMIC_CANARY":
                     # 动态金丝雀防守：黄金 vs 国债 vs 现金
-                    p_gold, m_gold, sc_gold = p.get("518880"), m.get("518880"), sc.get("518880")
-                    p_bond, m_bond, sc_bond = p.get("511010"), m.get("511010"), sc.get("511010")
+                    p_gold, m_gold, sc_gold = p.get("518880"), m.get("518880"), raw_sc.get("518880")
+                    p_bond, m_bond, sc_bond = p.get("511010"), m.get("511010"), raw_sc.get("511010")
                     gold_ok = pd.notna(p_gold) and pd.notna(m_gold) and p_gold > m_gold and pd.notna(sc_gold) and sc_gold > 0
                     bond_ok = pd.notna(p_bond) and pd.notna(m_bond) and p_bond > m_bond and pd.notna(sc_bond) and sc_bond > 0
                     if gold_ok and bond_ok:
@@ -117,6 +149,11 @@ def generate_domestic_sector_positions(
                         cur_sym = "CASH"
 
         targets.append(cur_sym)
+
+    s_targets = pd.Series(targets, index=dates)
+    pos_dict = {s: (s_targets == s).astype(float) for s in all_syms}
+    pos_df = pd.DataFrame(pos_dict, index=dates)
+    return pos_df
 
     s_targets = pd.Series(targets, index=dates)
     pos_dict = {s: (s_targets == s).astype(float) for s in all_syms}
@@ -156,27 +193,36 @@ def run_pipeline():
         "159915", "512480", "515050", "588000", "512000", "512800",
         "159928", "512690", "512010", "512660", "516160"
     ]
+    expanded_pool = domestic_pool + ["510880", "515220", "512400", "512980", "510500"]
 
-    # 构建全新的拓展网格搜索空间 (覆盖行业常用 20d 月线、30d、40d 原冠军窗口、60d 季线、90d)
-    mom_windows = [20, 30, 40, 60, 90]
-    ma_windows = [20, 40, 60, 90]
-    defense_modes = ["CASH", "518880", "511010", "DYNAMIC_CANARY"]
+    universe_pools = [
+        ("CORE_11", domestic_pool),
+    ]
+
+    # 构建全新的拓展网格搜索空间 (覆盖残差动量 vs 原始价格动量、多周期动量、均线滤波与纯净市场广度金丝雀)
+    mom_types = ["RES", "RAW"] # RES: 严格因果滚动残差动量 (剥离大盘Beta), RAW: 原始价格涨幅
+    mom_windows = [20, 30, 40, 60]
+    ma_windows = [40, 60]
+    breadth_thresholds = [0.0, 0.5] # 0.0=无广度过滤基线, 0.5=要求半数以上行业在均线上方
+    defense_modes = ["DYNAMIC_CANARY", "518880"]
 
     evaluated_strategies = []
     sharpe_list = []
 
-    total_configs = len(mom_windows) * len(ma_windows) * len(rebalance_options) * len(defense_modes)
-    print(f"[*] 启动纯境内 A 股多行业全网格搜索 ({total_configs} 组异构候选)...")
-    for mom_w, ma_w, (rebal_name, rebal_dates), def_m in itertools.product(
-        mom_windows, ma_windows, rebalance_options, defense_modes
+    total_configs = len(universe_pools) * len(mom_types) * len(mom_windows) * len(ma_windows) * len(breadth_thresholds) * len(defense_modes)
+    print(f"[*] 启动跨维度异构全网格搜索 ({total_configs} 组候选)...")
+    for (pool_name, active_pool), m_type, mom_w, ma_w, br_th, def_m in itertools.product(
+        universe_pools, mom_types, mom_windows, ma_windows, breadth_thresholds, defense_modes
     ):
-        cfg = {"mom": mom_w, "ma": ma_w, "rebal": rebal_name, "def": def_m}
+        cfg = {"pool": pool_name, "mom_type": m_type, "mom": mom_w, "ma": ma_w, "br": br_th, "rebal": "MONTHLY", "def": def_m}
         pos_df = generate_domestic_sector_positions(
-            panel_data, dates, rebal_dates,
-            sector_pool=domestic_pool,
+            panel_data, dates, monthly_dates,
+            sector_pool=active_pool,
             defense_mode=def_m,
+            mom_type=m_type,
             mom_window=mom_w,
-            ma_filter_window=ma_w
+            ma_filter_window=ma_w,
+            breadth_threshold=br_th
         )
         pos_train = pos_df.loc[pos_df.index <= pd.to_datetime(TRAIN_END_DATE)]
         
@@ -185,13 +231,15 @@ def run_pipeline():
         _, m_train = backtester.run_backtest(pos_train, panel_data)
         sharpe_list.append(m_train.get("sharpe_ratio", 0.0))
 
+        br_tag = f"BR{int(br_th*100)}" if br_th > 0 else "NoBR"
         evaluated_strategies.append({
-            "name": f"Domestic_Sector_Mom{mom_w}_MA{ma_w}_{rebal_name}_{def_m}",
+            "name": f"Domestic_Sector_{m_type}_Mom{mom_w}_MA{ma_w}_{br_tag}_{def_m}",
             "family": "Domestic_Sector_Canary",
             "pos_df": pos_df,
             "cpcv": cpcv_res,
             "train_metrics": m_train,
             "params": cfg,
+            "pool": active_pool,
         })
 
     print(f"[*] 全量策略 CPCV 审计完成，共评估 {len(evaluated_strategies)} 组异构策略配置")
@@ -244,14 +292,15 @@ def run_pipeline():
 
     # OOD 域外压力测试 (注入未训练的豆粕、养殖、钢铁等纯域外异构资产)
     stress_symbols = list(STRESS_UNIVERSE.keys())
-    rebal_choice = champion_candidate["params"].get("rebal", "MONTHLY")
-    rebal_dates_champ = monthly_dates if rebal_choice == "MONTHLY" else biweekly_dates
+    champ_pool = champion_candidate.get("pool", domestic_pool)
     ood_pos = generate_domestic_sector_positions(
-        panel_data, dates, rebal_dates_champ,
-        sector_pool=domestic_pool + stress_symbols,
+        panel_data, dates, monthly_dates,
+        sector_pool=champ_pool + stress_symbols,
         defense_mode=champion_candidate["params"]["def"],
+        mom_type=champion_candidate["params"].get("mom_type", "RES"),
         mom_window=champion_candidate["params"]["mom"],
-        ma_filter_window=champion_candidate["params"]["ma"]
+        ma_filter_window=champion_candidate["params"]["ma"],
+        breadth_threshold=champion_candidate["params"].get("br", 0.0)
     )
     rec_ood, m_ood = backtester.run_backtest(ood_pos, panel_data)
     is_ood_passed = (m_ood.get("sharpe_ratio", -1) >= 0.40 and m_ood.get("max_drawdown_pct", 100) <= 40.0)
@@ -374,10 +423,10 @@ def write_dynamic_report(champion, full_metrics, oos_audit, dsr, ood, ood_passed
 ## 二、 优胜策略：{champion['name']}
 
 * **策略家族**: `{champion['family']}`
-* **策略配置参数**: 动量回溯窗口 = `{p['mom']}日`, 均线滤波窗口 = `{p['ma']}日`, 调仓频率 = `{p.get('rebal', 'MONTHLY')}`, 防守模式 = `{p['def']}`
+* **策略配置参数**: 资产池 = `{p.get('pool', 'CORE_11')}`, 动量算法 = `{'严格滚动残差动量 (Residual Momentum)' if p.get('mom_type') == 'RES' else '原始区间涨幅动量 (Raw Momentum)'}`, 动量回溯 = `{p['mom']}日`, 均线滤波 = `{p['ma']}日`, 市场广度阈值 = `{p.get('br', 0.0)*100:.0f}%`, 调仓频率 = `{p.get('rebal', 'MONTHLY')}`, 防守模式 = `{p['def']}`
 * **执行机制**:
-  - 按照 {p.get('rebal', 'MONTHLY')} 定时再平衡，依据沪深300（{p['ma']}日均线）判断大盘多空环境；大盘走熊则按 {p['def']} 执行防守避险；
-  - 大盘多头时，在已上市的 11 大行业中挑选动量龙头全仓买入；
+  - 按照 {p.get('rebal', 'MONTHLY')} 定时再平衡，依据沪深300（{p['ma']}日均线）及全市场行业纯净动态广度（阈值 {p.get('br', 0.0)*100:.0f}%）判定多空环境；若大盘走熊或行业广度恶化则按 {p['def']} 执行防守避险；
+  - 市场健康时，在已上市的板块标的中通过 {'滚动残差动量' if p.get('mom_type') == 'RES' else '区间动量'} 挑选特异性龙头全仓买入；
   - 日收盘持仓破自身均线 2.0% 触发信号，次日 (T+1) 收盘执行清仓切回现金断路保命。
 
 ---
