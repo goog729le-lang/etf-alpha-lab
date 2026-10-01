@@ -1,12 +1,12 @@
 {
-    "generated_at": "2026-09-30 13:00:59",
-    "trade_date": "2026-09-30",
-    "action_type": "SWITCH",
-    "target_holding": "CASH",
-    "target_name": "现金 (CASH)",
+    "generated_at": "2026-10-01 13:54:28",
+    "trade_date": "2026-10-01",
+    "action_type": "HOLD",
+    "target_holding": "518880",
+    "target_name": "黄金ETF",
     "prev_holding": "518880",
     "prev_name": "黄金ETF",
-    "is_month_end": true,
+    "is_month_end": false,
     "stop_loss_triggered": false,
     "market_benchmark": {
         "symbol": "510300 (沪深300ETF)",
@@ -16,6 +16,6 @@
         "breadth_threshold_pct": 50.0,
         "status": "跌破均线 (大盘<=60MA，防守模式)"
     },
-    "action_reason": "【月末动态金丝雀】大盘走熊且黄金、国债均跌破均线，100% 切换为 CASH 现金空仓避险。",
+    "action_reason": "继续持有 518880 (黄金ETF)。现价 8.633，60日均线 8.754，运行正常无破位。",
     "champion_strategy": "Domestic_Sector_RES_Mom40_MA60_BR50_DYNAMIC_CANARY"
 }
