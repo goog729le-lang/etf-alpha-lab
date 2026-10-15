@@ -1,6 +1,6 @@
 {
-    "generated_at": "2026-10-14 12:22:53",
-    "trade_date": "2026-10-14",
+    "generated_at": "2026-10-15 12:07:47",
+    "trade_date": "2026-10-15",
     "action_type": "SELL",
     "target_holding": "CASH",
     "target_name": "现金 (CASH)",
@@ -10,12 +10,12 @@
     "stop_loss_triggered": true,
     "market_benchmark": {
         "symbol": "510300 (沪深300ETF)",
-        "current_price": 4.294,
-        "ma_filter": 4.76,
+        "current_price": 4.242,
+        "ma_filter": 4.759,
         "breadth_pct": 27.3,
         "breadth_threshold_pct": 50.0,
         "status": "跌破均线 (大盘<=60MA，防守模式)"
     },
-    "action_reason": "【触发严苛止损断路器】持仓标的 518880 (黄金ETF) 现价 8.501 跌破 60日均线 (8.752) 达到 -2.87% (超过 2.0% 止损阈值)，必须立即清仓切回现金 CASH 避险！",
+    "action_reason": "【触发严苛止损断路器】持仓标的 518880 (黄金ETF) 现价 8.472 跌破 60日均线 (8.751) 达到 -3.19% (超过 2.0% 止损阈值)，必须立即清仓切回现金 CASH 避险！",
     "champion_strategy": "Domestic_Sector_RES_Mom40_MA60_BR50_DYNAMIC_CANARY"
 }
